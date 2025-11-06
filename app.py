@@ -5,11 +5,12 @@ import plotly.express as px
 import statsmodels.api as sm
 from scipy import stats
 import plotly.graph_objects as go
+import plotly.io as pio # 画像エクスポートのために追加
 
 # --- ページ設定 (Page Config) ---
 st.set_page_config(layout="wide")
 st.title("Excelデータアナライザー 📈")
-st.info("Excelファイルをアップロードすると、①データの自動概要、②ピボTーブル分析、③統計解析 を実行します。")
+st.info("Excelファイルをアップロードすると、①データの自動概要、②ピボット分析、③統計解析 を実行します。")
 
 # --- セッションステートの初期化 (Initialize Session State) ---
 if 'pivot_df' not in st.session_state:
@@ -41,10 +42,11 @@ else:
 if st.session_state.df is not None:
     df = st.session_state.df
 
-    # --- (UX-IMPROVED v3) 1. データの自動概要（速報値） ---
+    # --- (UX-IMPROVED v4) 1. データの自動概要（速報値） ---
     st.markdown("---")
     st.header("1. データの自動概要（速報値）")
-    st.write("各項目（列）のデータ分布を自動で集計・可視化します。")
+    st.write("各項目（列）のデータ分布を自動で可視化します。")
+    st.info("グラフにマウスを合わせると右上に表示される **カメラアイコン** からも画像を保存できます。")
     
     # 全体の基本情報
     col1, col2, col3 = st.columns(3)
@@ -52,8 +54,9 @@ if st.session_state.df is not None:
     col2.metric("総項目数（列）", f"{len(df.columns)}")
     col3.metric("欠損値の合計", f"{df.isnull().sum().sum():,}")
     
-    # 除外リストを初期化
+    # (NEW) 要約情報をためておくリストを初期化
     excluded_cols_summary = []
+    numeric_summary_list = [] # 数値データの統計量をここに蓄積
     
     # カラーパレットの定義
     color_palette_pie = px.colors.qualitative.Pastel
@@ -63,23 +66,31 @@ if st.session_state.df is not None:
     TOP_N_FOR_OTHERS = 9 # 上位9位まで表示
     OTHERS_THRESHOLD = 0.2 # 「その他」が20%未満の場合に円グラフ採用
 
-    # 各列をループして自動集計
+    # --- グラフ描画ループ ---
+    st.subheader("📊 各項目のグラフ一覧")
     for col in df.columns:
-        st.markdown("---")
-        st.subheader(f"項目: {col}")
+        st.markdown(f"--- \n ### 項目: {col}") # H3レベルに変更
         
         # 1. 数値データ (Numeric Data) の場合 -> ヒストグラム
         if pd.api.types.is_numeric_dtype(df[col]):
             st.write(f"（数値データとして認識）")
             
-            # 基本統計量を表示
-            col1, col2, col3, col4 = st.columns(4)
-            desc_stats = df[col].describe()
-            col1.metric("平均値", f"{desc_stats['mean']:.2f}")
-            col2.metric("中央値", f"{desc_stats['50%']:.2f}")
-            col3.metric("最小値", f"{desc_stats['min']:.2f}")
-            col4.metric("最大値", f"{desc_stats['max']:.2f}")
-            
+            # (NEW) 統計量を計算し、リストに追加（表示はしない）
+            try:
+                desc_stats = df[col].describe()
+                numeric_summary_list.append({
+                    "項目名": col,
+                    "平均値": desc_stats['mean'],
+                    "中央値": desc_stats['50%'],
+                    "最小値": desc_stats['min'],
+                    "最大値": desc_stats['max'],
+                    "標準偏差": desc_stats['std'],
+                    "件数": desc_stats['count']
+                })
+            except Exception:
+                pass # 統計計算失敗時はスキップ
+
+            # ヒストグラムを描画
             try:
                 fig = px.histogram(
                     df, 
@@ -100,10 +111,6 @@ if st.session_state.df is not None:
             
             # (A) ユニーク数が 2〜10 の場合 (選択式設問と推定) -> 円グラフ
             if 1 < n_unique <= 10:
-                col1, col2 = st.columns([1,2])
-                col1.metric("種類", f"{n_unique} 種類")
-                col1.metric("最も多い回答", f"{counts.index[0]}")
-
                 try:
                     df_pie = counts.reset_index()
                     df_pie.columns = ['value', 'count']
@@ -116,28 +123,21 @@ if st.session_state.df is not None:
                         color_discrete_sequence=color_palette_pie
                     )
                     fig.update_traces(textposition='inside', textinfo='percent+label')
-                    col2.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, use_container_width=True)
                 except Exception as e:
                     st.warning(f"グラフ描画失敗 (円グラフ): {e}")
 
-            # (B) (NEW) ユニーク数が 11〜20 の場合 -> 「その他」ロジックを試行
+            # (B) ユニーク数が 11〜20 の場合 -> 「その他」ロジックを試行
             elif 10 < n_unique <= 20:
-                col1, col2 = st.columns([1,2])
-                col1.metric("種類", f"{n_unique} 種類")
-                col1.metric("最も多い回答", f"{counts.index[0]}")
-
                 try:
-                    # 「その他」ロジックの計算
                     total_count = counts.sum()
                     top_n_counts = counts.iloc[:TOP_N_FOR_OTHERS]
                     other_count = counts.iloc[TOP_N_FOR_OTHERS:].sum()
                     other_percentage = other_count / total_count
                     
-                    # (B-1) 「その他」が閾値未満なら、丸めて円グラフ
                     if other_count > 0 and other_percentage < OTHERS_THRESHOLD:
+                        # (B-1) 「その他」が閾値未満なら、丸めて円グラフ
                         st.write(f"（上位{TOP_N_FOR_OTHERS}件と「その他」で表示）")
-                        
-                        # 「その他」行を作成
                         other_row = pd.Series([other_count], index=['その他'])
                         df_pie_data = pd.concat([top_n_counts, other_row])
                         
@@ -152,10 +152,10 @@ if st.session_state.df is not None:
                             color_discrete_sequence=color_palette_pie
                         )
                         fig.update_traces(textposition='inside', textinfo='percent+label')
-                        col2.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, use_container_width=True)
                     
-                    # (B-2) 「その他」が閾値以上なら、丸めずに棒グラフ
                     else:
+                        # (B-2) 「その他」が閾値以上なら、丸めずに棒グラフ
                         st.write("（回答が分散しているため棒グラフで表示）")
                         df_bar = counts.reset_index()
                         df_bar.columns = ['value', 'count']
@@ -170,7 +170,7 @@ if st.session_state.df is not None:
                             color_discrete_sequence=color_palette_bar
                         )
                         fig.update_xaxes(title_text=col)
-                        col2.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, use_container_width=True)
                         
                 except Exception as e:
                     st.warning(f"グラフ描画失敗 (カテゴリ/その他): {e}")
@@ -182,8 +182,8 @@ if st.session_state.df is not None:
                 elif n_unique <= 1:
                     reason = f"回答の種類が1種類以下のため"
                 
-                st.warning(f"グラフ描画をスキップしました（理由: {reason}）")
-                excluded_cols_summary.append((col, reason)) # 除外リストに追加
+                # (NEW) 警告を表示せず、リストに追加のみ
+                excluded_cols_summary.append((col, reason))
         
         # 3. 日付データ (Datetime Data) の場合 -> 折れ線グラフ
         elif pd.api.types.is_datetime64_any_dtype(df[col]):
@@ -206,13 +206,23 @@ if st.session_state.df is not None:
         # 4. その他のデータ型
         else:
             reason = f"認識できないデータ型 ({df[col].dtype}) のため"
-            st.error(reason)
             excluded_cols_summary.append((col, reason))
 
-    # セクションの最後に、集計から外したデータのリストを表示
+    # --- (NEW) ループ終了後、要約情報をまとめて表示 ---
+    st.markdown("---")
+    st.subheader("📝 数値データの基本統計量まとめ")
+    
+    if numeric_summary_list:
+        summary_df = pd.DataFrame(numeric_summary_list).set_index("項目名")
+        # 数値を見やすくフォーマット
+        st.dataframe(summary_df.style.format("{:,.2f}"), use_container_width=True)
+    else:
+        st.info("集計対象となる数値データがありませんでした。")
+
+    # (NEW) スキップした項目も最後にまとめて表示
     if excluded_cols_summary:
         st.markdown("---")
-        st.subheader("集計から外した項目")
+        st.subheader("🚫 集計から外した項目")
         st.write("以下の項目は、回答の種類が多すぎる（フリーテキスト等）か、データ型が特殊なため自動概要のグラフ化から除外されました。")
         
         excluded_df = pd.DataFrame(excluded_cols_summary, columns=["項目名 (ラベル名)", "除外理由"])
@@ -302,35 +312,43 @@ if st.session_state.df is not None:
             )
 
             try:
-                fig = None
+                fig_pivot = None # グラフオブジェクトを格納する変数を初期化
                 if chart_type == "円グラフ":
                     if len(config["index"]) == 1 and not config["columns"]:
                         df_for_pie = pivot_df.reset_index()
                         names_col = config["index"][0]
                         values_col = config["values"]
-                        fig = px.pie(df_for_pie, names=names_col, values=values_col, 
+                        fig_pivot = px.pie(df_for_pie, names=names_col, values=values_col, 
                                      title=f"{values_col} ({config['agg_label']}) の構成比",
                                      color_discrete_sequence=color_palette_pie)
-                        fig.update_traces(textposition='inside', textinfo='percent+label')
-                        st.plotly_chart(fig, use_container_width=True)
+                        fig_pivot.update_traces(textposition='inside', textinfo='percent+label')
                     else:
                         st.warning("円グラフは「行」が1項目かつ「列」が空の場合のみ描画されます。")
                 
                 else:
                     if chart_type == "ヒートマップ":
-                        fig = px.imshow(pivot_df, text_auto=True, aspect="auto", title=f"{config['values']} ({config['agg_label']}) ヒートマップ")
+                        fig_pivot = px.imshow(pivot_df, text_auto=True, aspect="auto", title=f"{config['values']} ({config['agg_label']}) ヒートマップ")
                     elif chart_type == "グループ棒グラフ":
-                        fig = px.bar(pivot_df, barmode='group', title=f"{config['values']} ({config['agg_label']}) グループ棒グラフ",
+                        fig_pivot = px.bar(pivot_df, barmode='group', title=f"{config['values']} ({config['agg_label']}) グループ棒グラフ",
                                      color_discrete_sequence=color_palette_bar)
                     elif chart_type == "積み上げ棒グラフ":
-                        fig = px.bar(pivot_df, barmode='stack', title=f"{config['values']} ({config['agg_label']}) 積み上げ棒グラフ",
+                        fig_pivot = px.bar(pivot_df, barmode='stack', title=f"{config['values']} ({config['agg_label']}) 積み上げ棒グラフ",
                                      color_discrete_sequence=color_palette_bar)
                     elif chart_type == "折れ線グラフ":
-                        fig = px.line(pivot_df, title=f"{config['values']} ({config['agg_label']}) 折れ線グラフ",
+                        fig_pivot = px.line(pivot_df, title=f"{config['values']} ({config['agg_label']}) 折れ線グラフ",
                                       markers=True, color_discrete_sequence=color_palette_bar)
                     
-                    if fig:
-                        st.plotly_chart(fig, use_container_width=True)
+                if fig_pivot:
+                    st.plotly_chart(fig_pivot, use_container_width=True)
+                    
+                    img_bytes = pio.to_image(fig_pivot, format="png", scale=2)
+                    st.download_button(
+                        label="📈 グラフを画像(PNG)で保存",
+                        data=img_bytes,
+                        file_name=f"pivot_chart_{chart_type}.png",
+                        mime="image/png"
+                    )
+                    
             except Exception as e:
                 st.error(f"グラフ描画失敗: {e}")
 
@@ -358,16 +376,26 @@ if st.session_state.df is not None:
         with col1:
             y_var = st.selectbox("目的変数 (Y)", options=numeric_cols, index=None, help="予測したい変数（結果）", key="reg_y")
             x_var = st.selectbox("説明変数 (X)", options=numeric_cols, index=None, help="予測に使う変数（原因）", key="reg_x")
+            
+            fig_reg = None
 
         if y_var and x_var:
             try:
-                fig = px.scatter(
+                fig_reg = px.scatter(
                     df, x=x_var, y=y_var, 
                     trendline="ols", 
                     title=f"{y_var} vs {x_var} の散布図と回帰直線"
                 )
                 with col2:
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig_reg, use_container_width=True)
+                    
+                    img_bytes_reg = pio.to_image(fig_reg, format="png", scale=2)
+                    st.download_button(
+                        label="📈 散布図を画像(PNG)で保存",
+                        data=img_bytes_reg,
+                        file_name=f"regression_{y_var}_vs_{x_var}.png",
+                        mime="image/png"
+                    )
                 
                 X = sm.add_constant(df[x_var].dropna())
                 Y = df[y_var]
