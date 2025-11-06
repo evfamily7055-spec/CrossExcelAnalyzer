@@ -9,7 +9,7 @@ import plotly.graph_objects as go
 # --- ページ設定 (Page Config) ---
 st.set_page_config(layout="wide")
 st.title("Excelデータアナライザー 📈")
-st.info("Excelファイルをアップロードすると、①データの自動概要、②ピボット分析、③統計解析 を実行します。")
+st.info("Excelファイルをアップロードすると、①データの自動概要、②ピボTーブル分析、③統計解析 を実行します。")
 
 # --- セッションステートの初期化 (Initialize Session State) ---
 if 'pivot_df' not in st.session_state:
@@ -41,7 +41,7 @@ else:
 if st.session_state.df is not None:
     df = st.session_state.df
 
-    # --- (NEW) 1. データの自動概要（速報値） ---
+    # --- (UX-IMPROVED v3) 1. データの自動概要（速報値） ---
     st.markdown("---")
     st.header("1. データの自動概要（速報値）")
     st.write("各項目（列）のデータ分布を自動で集計・可視化します。")
@@ -52,12 +52,23 @@ if st.session_state.df is not None:
     col2.metric("総項目数（列）", f"{len(df.columns)}")
     col3.metric("欠損値の合計", f"{df.isnull().sum().sum():,}")
     
+    # 除外リストを初期化
+    excluded_cols_summary = []
+    
+    # カラーパレットの定義
+    color_palette_pie = px.colors.qualitative.Pastel
+    color_palette_bar = px.colors.qualitative.Safe
+    
+    # 「その他」に丸める際の閾値
+    TOP_N_FOR_OTHERS = 9 # 上位9位まで表示
+    OTHERS_THRESHOLD = 0.2 # 「その他」が20%未満の場合に円グラフ採用
+
     # 各列をループして自動集計
     for col in df.columns:
         st.markdown("---")
         st.subheader(f"項目: {col}")
         
-        # 1. 数値データ (Numeric Data) の場合
+        # 1. 数値データ (Numeric Data) の場合 -> ヒストグラム
         if pd.api.types.is_numeric_dtype(df[col]):
             st.write(f"（数値データとして認識）")
             
@@ -69,60 +80,115 @@ if st.session_state.df is not None:
             col3.metric("最小値", f"{desc_stats['min']:.2f}")
             col4.metric("最大値", f"{desc_stats['max']:.2f}")
             
-            # ヒストグラム（分布）を描画
             try:
                 fig = px.histogram(
                     df, 
                     x=col, 
                     title=f"「{col}」の分布（ヒストグラム）",
-                    marginal="box" # 上部に箱ひげ図も追加
+                    marginal="box"
                 )
                 st.plotly_chart(fig, use_container_width=True)
             except Exception as e:
                 st.warning(f"グラフ描画失敗 (数値): {e}")
 
         # 2. カテゴリデータ (Categorical Data) の場合
-        # (object型 または string型)
         elif pd.api.types.is_string_dtype(df[col]) or pd.api.types.is_object_dtype(df[col]):
             st.write(f"（カテゴリ/テキストデータとして認識）")
             
             n_unique = df[col].nunique()
+            counts = df[col].value_counts()
             
-            # (A) ユニーク数が少ない場合 (例: 20以下) -> 棒グラフ [Image of a vertical bar chart]
-            if 1 < n_unique <= 20:
+            # (A) ユニーク数が 2〜10 の場合 (選択式設問と推定) -> 円グラフ
+            if 1 < n_unique <= 10:
                 col1, col2 = st.columns([1,2])
-                
                 col1.metric("種類", f"{n_unique} 種類")
-                col1.metric("最も多い回答", f"{df[col].mode().iloc[0]}")
-                
+                col1.metric("最も多い回答", f"{counts.index[0]}")
+
                 try:
-                    # value_counts() で集計
-                    counts = df[col].value_counts().reset_index()
-                    counts.columns = ['value', 'count'] # カラム名をリネーム
+                    df_pie = counts.reset_index()
+                    df_pie.columns = ['value', 'count']
                     
-                    fig = px.bar(
-                        counts, 
-                        x='value', 
-                        y='count',
-                        title=f"「{col}」の内訳（棒グラフ）",
-                        text='count' # 棒グラフに件数を表示
+                    fig = px.pie(
+                        df_pie, 
+                        names='value', 
+                        values='count', 
+                        title=f"「{col}」の構成比（円グラフ）",
+                        color_discrete_sequence=color_palette_pie
                     )
-                    fig.update_xaxes(title_text=col) # X軸ラベルを列名に
+                    fig.update_traces(textposition='inside', textinfo='percent+label')
                     col2.plotly_chart(fig, use_container_width=True)
                 except Exception as e:
-                    st.warning(f"グラフ描画失敗 (カテゴリ): {e}")
+                    st.warning(f"グラフ描画失敗 (円グラフ): {e}")
+
+            # (B) (NEW) ユニーク数が 11〜20 の場合 -> 「その他」ロジックを試行
+            elif 10 < n_unique <= 20:
+                col1, col2 = st.columns([1,2])
+                col1.metric("種類", f"{n_unique} 種類")
+                col1.metric("最も多い回答", f"{counts.index[0]}")
+
+                try:
+                    # 「その他」ロジックの計算
+                    total_count = counts.sum()
+                    top_n_counts = counts.iloc[:TOP_N_FOR_OTHERS]
+                    other_count = counts.iloc[TOP_N_FOR_OTHERS:].sum()
+                    other_percentage = other_count / total_count
+                    
+                    # (B-1) 「その他」が閾値未満なら、丸めて円グラフ
+                    if other_count > 0 and other_percentage < OTHERS_THRESHOLD:
+                        st.write(f"（上位{TOP_N_FOR_OTHERS}件と「その他」で表示）")
+                        
+                        # 「その他」行を作成
+                        other_row = pd.Series([other_count], index=['その他'])
+                        df_pie_data = pd.concat([top_n_counts, other_row])
+                        
+                        df_pie = df_pie_data.reset_index()
+                        df_pie.columns = ['value', 'count']
+
+                        fig = px.pie(
+                            df_pie, 
+                            names='value', 
+                            values='count', 
+                            title=f"「{col}」の構成比（円グラフ, その他集約）",
+                            color_discrete_sequence=color_palette_pie
+                        )
+                        fig.update_traces(textposition='inside', textinfo='percent+label')
+                        col2.plotly_chart(fig, use_container_width=True)
+                    
+                    # (B-2) 「その他」が閾値以上なら、丸めずに棒グラフ
+                    else:
+                        st.write("（回答が分散しているため棒グラフで表示）")
+                        df_bar = counts.reset_index()
+                        df_bar.columns = ['value', 'count']
+                        
+                        fig = px.bar(
+                            df_bar, 
+                            x='value', 
+                            y='count',
+                            title=f"「{col}」の内訳（棒グラフ）",
+                            text='count',
+                            color='value',
+                            color_discrete_sequence=color_palette_bar
+                        )
+                        fig.update_xaxes(title_text=col)
+                        col2.plotly_chart(fig, use_container_width=True)
+                        
+                except Exception as e:
+                    st.warning(f"グラフ描画失敗 (カテゴリ/その他): {e}")
             
-            # (B) ユニーク数が多すぎる場合 (例: > 20) -> フリーテキストとみなし、グラフ化しない
+            # (C) ユニーク数が多すぎる(>20) or 少なすぎる(<=1)場合
             else:
-                st.write(f"ユニークな値が {n_unique} 種類あります。（フリーテキストの可能性）")
-                st.write("**回答例 (先頭5件):**")
-                st.dataframe(df[col].dropna().unique()[:5], use_container_width=True)
+                if n_unique > 20:
+                    reason = f"回答の種類が {n_unique} と多すぎるため（フリーテキストの可能性）"
+                elif n_unique <= 1:
+                    reason = f"回答の種類が1種類以下のため"
+                
+                st.warning(f"グラフ描画をスキップしました（理由: {reason}）")
+                excluded_cols_summary.append((col, reason)) # 除外リストに追加
         
-        # 3. 日付データ (Datetime Data) の場合
+        # 3. 日付データ (Datetime Data) の場合 -> 折れ線グラフ
         elif pd.api.types.is_datetime64_any_dtype(df[col]):
             st.write(f"（日付データとして認識）")
             try:
-                # 日付ごとの件数を集計
                 counts_over_time = df[col].dt.date.value_counts().sort_index().reset_index()
                 counts_over_time.columns = ['date', 'count']
                 
@@ -136,6 +202,21 @@ if st.session_state.df is not None:
                 st.plotly_chart(fig, use_container_width=True)
             except Exception as e:
                 st.warning(f"グラフ描画失敗 (日付): {e}")
+        
+        # 4. その他のデータ型
+        else:
+            reason = f"認識できないデータ型 ({df[col].dtype}) のため"
+            st.error(reason)
+            excluded_cols_summary.append((col, reason))
+
+    # セクションの最後に、集計から外したデータのリストを表示
+    if excluded_cols_summary:
+        st.markdown("---")
+        st.subheader("集計から外した項目")
+        st.write("以下の項目は、回答の種類が多すぎる（フリーテキスト等）か、データ型が特殊なため自動概要のグラフ化から除外されました。")
+        
+        excluded_df = pd.DataFrame(excluded_cols_summary, columns=["項目名 (ラベル名)", "除外理由"])
+        st.dataframe(excluded_df, use_container_width=True)
 
 
     # --- 2. データプレビュー (Data Preview) ---
@@ -143,8 +224,6 @@ if st.session_state.df is not None:
     st.header("2. データプレビュー (先頭10行)")
     with st.expander("データ全体を表示する"):
         st.dataframe(df.head(10), use_container_width=True)
-
-    # (以降のセクション番号をずらす)
 
     # --- 3. ピボットテーブル & グラフセクション (Pivot Table & Graph Section) ---
     st.markdown("---")
@@ -157,7 +236,6 @@ if st.session_state.df is not None:
         with col1:
             st.subheader("ピボット設定")
             
-            # データを数値列とカテゴリ列に分類
             numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
             
             index_cols = st.multiselect(
@@ -230,7 +308,9 @@ if st.session_state.df is not None:
                         df_for_pie = pivot_df.reset_index()
                         names_col = config["index"][0]
                         values_col = config["values"]
-                        fig = px.pie(df_for_pie, names=names_col, values=values_col, title=f"{values_col} ({config['agg_label']}) の構成比")
+                        fig = px.pie(df_for_pie, names=names_col, values=values_col, 
+                                     title=f"{values_col} ({config['agg_label']}) の構成比",
+                                     color_discrete_sequence=color_palette_pie)
                         fig.update_traces(textposition='inside', textinfo='percent+label')
                         st.plotly_chart(fig, use_container_width=True)
                     else:
@@ -240,12 +320,14 @@ if st.session_state.df is not None:
                     if chart_type == "ヒートマップ":
                         fig = px.imshow(pivot_df, text_auto=True, aspect="auto", title=f"{config['values']} ({config['agg_label']}) ヒートマップ")
                     elif chart_type == "グループ棒グラフ":
-                        fig = px.bar(pivot_df, barmode='group', title=f"{config['values']} ({config['agg_label']}) グループ棒グラフ")
+                        fig = px.bar(pivot_df, barmode='group', title=f"{config['values']} ({config['agg_label']}) グループ棒グラフ",
+                                     color_discrete_sequence=color_palette_bar)
                     elif chart_type == "積み上げ棒グラフ":
-                        fig = px.bar(pivot_df, barmode='stack', title=f"{config['values']} ({config['agg_label']}) 積み上げ棒グラフ")
+                        fig = px.bar(pivot_df, barmode='stack', title=f"{config['values']} ({config['agg_label']}) 積み上げ棒グラフ",
+                                     color_discrete_sequence=color_palette_bar)
                     elif chart_type == "折れ線グラフ":
-                        fig = px.line(pivot_df, title=f"{config['values']} ({config['agg_label']}) 折れ線グラフ")
-                        fig.update_traces(mode='markers+lines')
+                        fig = px.line(pivot_df, title=f"{config['values']} ({config['agg_label']}) 折れ線グラフ",
+                                      markers=True, color_discrete_sequence=color_palette_bar)
                     
                     if fig:
                         st.plotly_chart(fig, use_container_width=True)
@@ -257,7 +339,6 @@ if st.session_state.df is not None:
     st.markdown("---")
     st.header("4. 統計解析")
     
-    # データを数値列とカテゴリ列に分類
     numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
     categorical_cols = df.select_dtypes(exclude=['number']).columns.tolist()
     
@@ -282,7 +363,7 @@ if st.session_state.df is not None:
             try:
                 fig = px.scatter(
                     df, x=x_var, y=y_var, 
-                    trendline="ols", # 回帰直線を自動描画
+                    trendline="ols", 
                     title=f"{y_var} vs {x_var} の散布図と回帰直線"
                 )
                 with col2:
